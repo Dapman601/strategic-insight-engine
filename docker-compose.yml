@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database with pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: insight-postgres
+    environment:
+      POSTGRES_DB: strategic_insight
+      POSTGRES_USER: insight_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_this_password}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insight_user -d strategic_insight"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - insight-network
+    restart: unless-stopped
+
+  # FastAPI application
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: insight-api
+    environment:
+      DATABASE_URL: postgresql://insight_user:${DB_PASSWORD:-change_this_password}@postgres:5432/strategic_insight
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_RELOAD: "false"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_API_URL: ${GROK_API_URL:-https://api.x.ai/v1}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_USER_ID: ${SLACK_USER_ID:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - insight-network
+    restart: unless-stopped
+
+  # Weekly cron job runner
+  weekly-processor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: insight-processor
+    environment:
+      DATABASE_URL: postgresql://insight_user:${DB_PASSWORD:-change_this_password}@postgres:5432/strategic_insight
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      GROK_API_URL: ${GROK_API_URL:-https://api.x.ai/v1}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_USER_ID: ${SLACK_USER_ID:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    command: >
+      sh -c "
+        echo 'Setting up weekly cron job...' &&
+        echo '0 9 * * 1 cd /app && python scripts/weekly_run.py >> /app/logs/weekly.log 2>&1' > /etc/cron.d/weekly-insight &&
+        chmod 0644 /etc/cron.d/weekly-insight &&
+        crontab /etc/cron.d/weekly-insight &&
+        echo 'Weekly processing scheduled: Mondays at 9 AM UTC' &&
+        cron -f
+      "
+    networks:
+      - insight-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  insight-network:
+    driver: bridge

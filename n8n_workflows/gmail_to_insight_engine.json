@@ -1,0 +1,179 @@
+{
+  "name": "Gmail to Insight Engine",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start-node",
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyHour"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "labelIds": ["INBOX"],
+          "maxResults": 50
+        },
+        "format": "resolved"
+      },
+      "id": "gmail-trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize Gmail message to canonical event schema\nconst item = $input.item.json;\n\n// Generate unique ID\nconst eventId = `gmail:${item.id}`;\n\n// Determine direction\nlet direction = 'inbound';\nconst userEmail = 'frontendlabs.uk@gmail.com';\nif (item.from && item.from.includes(userEmail)) {\n  direction = 'outbound';\n}\n\n// Extract thread ID\nconst threadId = item.threadId || null;\n\n// Parse decision status from text\nlet decision = 'none';\nlet actionOwner = null;\nconst text = (item.snippet || '') + ' ' + (item.plainText || '');\nconst lowerText = text.toLowerCase();\n\nif (lowerText.includes('decided') || lowerText.includes('decision made')) {\n  decision = 'made';\n}\nif (lowerText.includes('defer') || lowerText.includes('postpone')) {\n  decision = 'deferred';\n}\n\n// Extract action owner\nconst ownerMatch = text.match(/action owner[:\\s]+([\\w\\s\\.]+)/i);\nif (ownerMatch) {\n  actionOwner = ownerMatch[1].trim();\n}\n\n// Determine follow-up requirement\nconst followUpRequired = lowerText.includes('follow up') || \n                         lowerText.includes('follow-up') ||\n                         lowerText.includes('next steps');\n\n// Calculate urgency score (0-10)\nlet urgencyScore = 3; // default\nif (lowerText.includes('urgent') || lowerText.includes('asap')) {\n  urgencyScore = 9;\n} else if (lowerText.includes('important') || lowerText.includes('priority')) {\n  urgencyScore = 7;\n} else if (lowerText.includes('when you can') || lowerText.includes('no rush')) {\n  urgencyScore = 2;\n}\n\n// Build canonical event\nconst canonicalEvent = {\n  id: eventId,\n  source: 'email',\n  timestamp: new Date(parseInt(item.internalDate)).toISOString(),\n  actor: item.from || 'unknown',\n  direction: direction,\n  subject: item.subject || '(no subject)',\n  text: (item.snippet || item.plainText || '').substring(0, 2000),\n  thread_id: threadId,\n  decision: decision,\n  action_owner: actionOwner,\n  follow_up_required: followUpRequired,\n  urgency_score: urgencyScore,\n  sentiment: 'unknown',\n  raw_ref: item.id\n};\n\nreturn { json: canonicalEvent };"
+      },
+      "id": "normalize-gmail",
+      "name": "Normalize Gmail Event",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/ingest/email",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "post-to-api",
+      "name": "POST to Insight API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.ok }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-success",
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1050, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "console.log('Successfully ingested event:', $json.id);\nreturn { json: { status: 'success', event_id: $json.id } };"
+      },
+      "id": "success-log",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "console.error('Failed to ingest event:', $json);\nreturn { json: { status: 'error', data: $json } };"
+      },
+      "id": "error-log",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1250, 400]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Gmail Trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Gmail Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Gmail Event": {
+      "main": [
+        [
+          {
+            "node": "POST to Insight API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST to Insight API": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Success": {
+      "main": [
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "gmail-insight-workflow"
+}

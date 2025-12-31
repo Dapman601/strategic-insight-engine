@@ -1,0 +1,151 @@
+{
+  "name": "Read.ai to Insight Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "readai-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Read.ai Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "readai-meetings"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalize Read.ai meeting to canonical event schema\nconst item = $input.item.json;\n\n// Generate unique ID\nconst eventId = `read_ai:${item.meeting_id || item.id}`;\n\n// Extract participants\nconst participants = (item.participants || []).map(p => p.email || p.name).join(', ');\n\n// Determine direction based on organizer\nlet direction = 'internal';\nconst userEmail = 'frontendlabs.uk@gmail.com';\nif (item.organizer && item.organizer.includes(userEmail)) {\n  direction = 'outbound';\n} else if (item.participants && item.participants.some(p => !p.email || !p.email.includes('@yourcompany.com'))) {\n  direction = 'inbound';\n}\n\n// Parse decision status from transcript\nlet decision = 'none';\nlet actionOwner = null;\nconst transcript = item.transcript || item.summary || '';\nconst lowerTranscript = transcript.toLowerCase();\n\nif (lowerTranscript.includes('decided') || lowerTranscript.includes('we will') || lowerTranscript.includes('agreed to')) {\n  decision = 'made';\n}\nif (lowerTranscript.includes('defer') || lowerTranscript.includes('table this') || lowerTranscript.includes('revisit later')) {\n  decision = 'deferred';\n}\n\n// Extract action items and owners\nconst actionItems = item.action_items || [];\nif (actionItems.length > 0 && actionItems[0].owner) {\n  actionOwner = actionItems[0].owner;\n}\n\n// Determine follow-up requirement\nconst followUpRequired = actionItems.length > 0 || \n                         lowerTranscript.includes('follow up') ||\n                         lowerTranscript.includes('next meeting');\n\n// Calculate urgency score (0-10)\nlet urgencyScore = 5; // default for meetings\nif (item.priority === 'high' || lowerTranscript.includes('urgent') || lowerTranscript.includes('critical')) {\n  urgencyScore = 9;\n} else if (item.priority === 'medium' || actionItems.length > 3) {\n  urgencyScore = 7;\n} else if (item.priority === 'low' || item.meeting_type === 'status update') {\n  urgencyScore = 4;\n}\n\n// Build text from summary and truncated transcript\nconst summaryText = item.summary || '';\nconst transcriptExcerpt = transcript.substring(0, 1000);\nconst fullText = `${summaryText}\\n\\nKey points: ${transcriptExcerpt}`;\n\n// Build canonical event\nconst canonicalEvent = {\n  id: eventId,\n  source: 'meeting',\n  timestamp: new Date(item.start_time || item.created_at).toISOString(),\n  actor: participants || item.organizer || 'unknown',\n  direction: direction,\n  subject: item.title || item.meeting_title || '(untitled meeting)',\n  text: fullText.substring(0, 2000),\n  thread_id: item.recurring_meeting_id || null,\n  decision: decision,\n  action_owner: actionOwner,\n  follow_up_required: followUpRequired,\n  urgency_score: urgencyScore,\n  sentiment: 'unknown',\n  raw_ref: item.meeting_url || item.id\n};\n\nreturn { json: canonicalEvent };"
+      },
+      "id": "normalize-readai",
+      "name": "Normalize Read.ai Event",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:8000/ingest/meeting",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "post-to-api",
+      "name": "POST to Insight API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.ok }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check-success",
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"status\": \"success\", \"event_id\": $json.id } }}"
+      },
+      "id": "success-response",
+      "name": "Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1050, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"status\": \"error\", \"message\": \"Failed to ingest event\" } }}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1050, 400]
+    }
+  ],
+  "connections": {
+    "Read.ai Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize Read.ai Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Read.ai Event": {
+      "main": [
+        [
+          {
+            "node": "POST to Insight API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST to Insight API": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Success": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "readai-insight-workflow"
+}
